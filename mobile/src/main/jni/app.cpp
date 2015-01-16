@@ -43,6 +43,31 @@ void on_app_cmd(android_app *app, int32_t cmd) {
     }
 }
 
+int32_t on_input_event(android_app *app, AInputEvent *event) {
+    user_data *p = (user_data *)app->userData;
+    int event_type = AInputEvent_getType(event);
+
+    switch (event_type)
+    {
+        case AINPUT_EVENT_TYPE_KEY:
+        {
+            __android_log_print(ANDROID_LOG_INFO, p->app_name, "event_type was AINPUT_EVENT_TYPE_KEY");
+            break;
+        }
+        case AINPUT_EVENT_TYPE_MOTION:
+        {
+            __android_log_print(ANDROID_LOG_INFO, p->app_name, "event_type was AINPUT_EVENT_TYPE_MOTION");
+            break;
+        }
+        default:
+        {
+            __android_log_print(ANDROID_LOG_INFO, p->app_name, "unknown event_type was %d", event_type);
+            break;
+        }
+    }
+    return 0;
+}
+
 void android_main(android_app *app) {
     app_dummy();
 
@@ -51,6 +76,7 @@ void android_main(android_app *app) {
     app->userData = &p;
 
     app->onAppCmd = on_app_cmd;
+    app->onInputEvent = on_input_event;
 
     while (1) {
         int poll_result, events;
