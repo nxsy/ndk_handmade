@@ -13,6 +13,14 @@ struct user_data {
     EGLDisplay display;
     EGLSurface surface;
     EGLContext context;
+
+    uint program;
+    uint a_pos_id;
+    uint a_tex_coord_id;
+    uint texture_id;
+    uint sampler_id;
+
+    uint8_t *texture_buffer;
 };
 
 char *cmd_names[] = {
@@ -68,6 +76,89 @@ void init(android_app *app)
     p->context = eglCreateContext(p->display, config, EGL_NO_CONTEXT, context_attribs);
 
     eglMakeCurrent(p->display, p->surface, p->surface, p->context);
+
+    p->program = glCreateProgram();
+    char *vertex_shader_source =
+        "attribute vec2 a_pos; \n"
+        "attribute vec2 a_tex_coord; \n"
+        "varying vec2 v_tex_coord; \n"
+        "void main() \n"
+        "{ \n"
+        " gl_Position = vec4(a_pos, 0, 1); \n"
+        " v_tex_coord = a_tex_coord; \n"
+        "} \n";
+
+
+    char *fragment_shader_source =
+        "precision mediump float;\n"
+        "varying vec2 v_tex_coord;\n"
+        "uniform sampler2D tex;\n"
+        "void main() \n"
+        "{ \n"
+        " gl_FragColor = texture2D( tex, v_tex_coord );\n"
+        "} \n";
+
+    uint vertex_shader_id;
+    uint fragment_shader_id;
+
+    {
+        uint shader = vertex_shader_id = glCreateShader(GL_VERTEX_SHADER);
+        int compiled;
+        glShaderSource(shader, 1, (const char* const *)&vertex_shader_source, 0);
+        glCompileShader(shader);
+        glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+        if (!compiled)
+        {
+            char info_log[1024];
+            glGetShaderInfoLog(shader, sizeof(info_log), 0, info_log);
+            __android_log_print(ANDROID_LOG_INFO, p->app_name, "vertex shader failed to compile: %s", info_log);
+        }
+    }
+    {
+        uint shader = fragment_shader_id = glCreateShader(GL_FRAGMENT_SHADER);
+        int compiled;
+        glShaderSource(shader, 1, (const char* const *)&fragment_shader_source, 0);
+        glCompileShader(shader);
+        glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+        if (!compiled)
+        {
+            char info_log[1024];
+            glGetShaderInfoLog(shader, sizeof(info_log), 0, info_log);
+            __android_log_print(ANDROID_LOG_INFO, p->app_name, "fragment shader failed to compile: %s", info_log);
+        }
+    }
+    glAttachShader(p->program, vertex_shader_id);
+    glAttachShader(p->program, fragment_shader_id);
+    glLinkProgram(p->program);
+
+    int linked;
+    glGetProgramiv(p->program, GL_LINK_STATUS, &linked);
+    if (!linked)
+    {
+        char info_log[1024];
+        glGetProgramInfoLog(p->program, sizeof(info_log), 0, info_log);
+        __android_log_print(ANDROID_LOG_INFO, p->app_name, "program failed to link: %s", info_log);
+    }
+
+    glUseProgram(p->program);
+    p->a_pos_id = glGetAttribLocation(p->program, "a_pos");
+    p->a_tex_coord_id = glGetAttribLocation(p->program, "a_tex_coord");
+    p->sampler_id = glGetAttribLocation(p->program, "tex");
+    glEnableVertexAttribArray(p->a_pos_id);
+    glEnableVertexAttribArray(p->a_tex_coord_id);
+
+    glGenTextures(1, &p->texture_id);
+    glBindTexture(GL_TEXTURE_2D, p->texture_id);
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+        960, 540, 0,
+        GL_RGBA, GL_UNSIGNED_BYTE, p->texture_buffer);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+
+    glDepthFunc(GL_ALWAYS);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CULL_FACE);
 }
 
 void term(android_app *app)
@@ -132,10 +223,46 @@ void draw(android_app *app)
 {
     user_data *p = (user_data *)app->userData;
     static uint8_t grey_value = 0;
-    grey_value += 13;
+    grey_value += 1;
 
     glClearColor(grey_value / 255.0, grey_value / 255.0, grey_value / 255.0, 1.0);
     glClear(GL_COLOR_BUFFER_BIT);
+
+    float vertexCoords[] =
+    {
+        -.75, .75,
+        -.75, -.75,
+        .75, .75,
+        .75, -.75,
+    };
+    float texCoords[] =
+    {
+        0.0, 0.0,
+        0.0, 1.0,
+        1.0, 0.0,
+        1.0, 1.0,
+    };
+
+    uint16_t indices[] = { 0, 1, 2, 1, 2, 3 };
+
+    glUseProgram(p->program);
+    glVertexAttribPointer(p->a_pos_id, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), vertexCoords);
+    glVertexAttribPointer(p->a_tex_coord_id, 2, GL_FLOAT, GL_FALSE, 2*sizeof(GLfloat), texCoords);
+    glEnableVertexAttribArray(p->a_pos_id);
+    glEnableVertexAttribArray(p->a_tex_coord_id);
+    glBindTexture(GL_TEXTURE_2D, p->texture_id);
+    glTexSubImage2D(GL_TEXTURE_2D,
+        0,
+        0,
+        0,
+        960,
+        540,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        p->texture_buffer);
+
+    glUniform1i(p->sampler_id, 0);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, indices);
 
     eglSwapBuffers(p->display, p->surface);
 }
@@ -144,12 +271,15 @@ void android_main(android_app *app) {
     app_dummy();
 
     user_data p = {};
+    p.texture_buffer = (uint8_t *)malloc(4 * 960 * 540);
     strcpy(p.app_name, "org.nxsy.ndk_handmade");
     app->userData = &p;
 
     app->onAppCmd = on_app_cmd;
     app->onInputEvent = on_input_event;
     uint64_t counter;
+    uint start_row = 0;
+    uint start_col = 0;
     while (++counter) {
         timespec start_time = {};
         clock_gettime(CLOCK_MONOTONIC_RAW, &start_time);
@@ -190,6 +320,27 @@ void android_main(android_app *app) {
                 break;
             }
         }
+
+        bzero(p.texture_buffer, 4 * 960 * 540);
+
+        for (uint row = start_row;
+            row < start_row + 100;
+            ++row)
+        {
+            uint8_t *buffer_row = p.texture_buffer + (row * 4 * 960);
+            for (uint col = start_col;
+                col < start_col + 20;
+                ++col)
+            {
+                uint8_t *pixel = buffer_row + (col * 4);
+                *pixel = 255;
+            }
+        }
+
+        start_row += 40;
+        start_row %= 400;
+        start_col += 3;
+        start_col %= 900;
 
         draw(app);
 
