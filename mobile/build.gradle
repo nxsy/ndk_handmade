@@ -14,6 +14,7 @@ android {
         ndk {
             moduleName "NdkHandmadeModule"
             ldLibs "android", "log", "EGL", "GLESv2"
+            cFlags "-DHANDMADE_SLOW=1 -DHANDMADE_INTERNAL=1 -std=c++11 -I${project.buildDir}/../src/main/handmade"
         }
     }
     buildTypes {
@@ -22,6 +23,7 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
+    sourceSets { main { assets.srcDirs = ['src/main/assets'] } }
 }
 
 dependencies {

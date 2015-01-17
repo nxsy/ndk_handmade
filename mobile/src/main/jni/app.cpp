@@ -1,4 +1,5 @@
 #include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -8,11 +9,17 @@
 #include <android/log.h>
 #include "android_native_app_glue.h"
 
+#include "handmade_platform.h"
+
+#include "handmade.cpp"
+
 struct user_data {
     char app_name[64];
     EGLDisplay display;
     EGLSurface surface;
     EGLContext context;
+
+    bool drawable;
 
     uint program;
     uint a_pos_id;
@@ -21,6 +28,12 @@ struct user_data {
     uint sampler_id;
 
     uint8_t *texture_buffer;
+
+    uint64_t total_size;
+    void *game_memory_block;
+
+    char binary_name[1024];
+    char *one_past_binary_filename_slash;
 };
 
 char *cmd_names[] = {
@@ -95,7 +108,8 @@ void init(android_app *app)
         "uniform sampler2D tex;\n"
         "void main() \n"
         "{ \n"
-        " gl_FragColor = texture2D( tex, v_tex_coord );\n"
+        " vec4 texture_color = vec4(texture2D( tex, v_tex_coord ).bgr, 1.0);\n"
+        " gl_FragColor = texture_color;\n"
         "} \n";
 
     uint vertex_shader_id;
@@ -159,11 +173,14 @@ void init(android_app *app)
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_STENCIL_TEST);
     glDisable(GL_CULL_FACE);
+
+    p->drawable = 1;
 }
 
 void term(android_app *app)
 {
     user_data *p = (user_data *)app->userData;
+    p->drawable = 0;
     eglMakeCurrent(p->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroyContext(p->display, p->context);
     eglDestroySurface(p->display, p->surface);
@@ -222,6 +239,11 @@ int32_t on_input_event(android_app *app, AInputEvent *event) {
 void draw(android_app *app)
 {
     user_data *p = (user_data *)app->userData;
+    if (!p->drawable)
+    {
+        return;
+    }
+    eglMakeCurrent(p->display, p->surface, p->surface, p->context);
     static uint8_t grey_value = 0;
     grey_value += 1;
 
@@ -230,10 +252,10 @@ void draw(android_app *app)
 
     float vertexCoords[] =
     {
-        -.75, .75,
-        -.75, -.75,
-        .75, .75,
-        .75, -.75,
+        -1, 1,
+        -1, -1,
+        1, 1,
+        1, -1,
     };
     float texCoords[] =
     {
@@ -246,6 +268,16 @@ void draw(android_app *app)
     uint16_t indices[] = { 0, 1, 2, 1, 2, 3 };
 
     glUseProgram(p->program);
+
+    uint a_pos_id = glGetAttribLocation(p->program, "a_pos");
+    uint a_tex_coord_id = glGetAttribLocation(p->program, "a_tex_coord");
+    uint sampler_id = glGetAttribLocation(p->program, "tex");
+
+    if (!((a_pos_id == p->a_pos_id) && (a_tex_coord_id == p->a_tex_coord_id) && (sampler_id == p->sampler_id)))
+    {
+        __android_log_print(ANDROID_LOG_INFO, "org.nxsy.ndk_handmade", "program mismatch: pos_id %d/%d, tex_coord %d/%d, sampler_id %d/%d", a_pos_id, p->a_pos_id, a_tex_coord_id, p->a_tex_coord_id, sampler_id, p->sampler_id);
+    }
+
     glVertexAttribPointer(p->a_pos_id, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), vertexCoords);
     glVertexAttribPointer(p->a_tex_coord_id, 2, GL_FLOAT, GL_FALSE, 2*sizeof(GLfloat), texCoords);
     glEnableVertexAttribArray(p->a_pos_id);
@@ -267,8 +299,38 @@ void draw(android_app *app)
     eglSwapBuffers(p->display, p->surface);
 }
 
+static AAssetManager *asset_manager;
+
+DEBUG_PLATFORM_READ_ENTIRE_FILE(debug_read_entire_file)
+{
+    debug_read_file_result result = {};
+
+    AAsset *asset = AAssetManager_open(asset_manager, Filename, AASSET_MODE_BUFFER);
+
+    if (asset == 0)
+    {
+        __android_log_print(ANDROID_LOG_INFO, "org.nxsy.ndk_handmade", "Failed to open file %s", Filename);
+        return result;
+    }
+
+    uint64_t asset_size = AAsset_getLength64(asset);
+
+    char *buf = (char *)malloc(asset_size + 1);
+    AAsset_read(asset, buf, asset_size);
+    AAsset_close(asset);
+
+    buf[asset_size] = 0;
+
+    result.Contents = buf;
+    result.ContentsSize = asset_size;
+
+    return(result);
+}
+
 void android_main(android_app *app) {
     app_dummy();
+
+    asset_manager = app->activity->assetManager;
 
     user_data p = {};
     p.texture_buffer = (uint8_t *)malloc(4 * 960 * 540);
@@ -280,6 +342,30 @@ void android_main(android_app *app) {
     uint64_t counter;
     uint start_row = 0;
     uint start_col = 0;
+
+    game_memory m = {};
+    m.PermanentStorageSize = 64 * 1024 * 1024;
+    m.TransientStorageSize = 64 * 1024 * 1024;
+    p.total_size = m.PermanentStorageSize + m.TransientStorageSize;
+    p.game_memory_block = calloc(p.total_size, sizeof(uint8));
+    m.PermanentStorage = (uint8 *)p.game_memory_block;
+    m.TransientStorage =
+        (uint8_t *)m.PermanentStorage + m.TransientStorageSize;
+
+#ifdef HANDMADE_INTERNAL
+    m.DEBUGPlatformReadEntireFile = debug_read_entire_file;
+#endif
+
+    thread_context t = {};
+
+    game_input input[2] = {};
+    game_input *new_input = &input[0];
+    game_input *old_input = &input[1];
+
+    int monitor_refresh_hz = 60;
+    real32 game_update_hz = (monitor_refresh_hz / 2.0f); // Should almost always be an int...
+    long target_nanoseconds_per_frame = (1000 * 1000 * 1000) / game_update_hz;
+
     while (++counter) {
         timespec start_time = {};
         clock_gettime(CLOCK_MONOTONIC_RAW, &start_time);
@@ -321,26 +407,16 @@ void android_main(android_app *app) {
             }
         }
 
-        bzero(p.texture_buffer, 4 * 960 * 540);
+        new_input->dtForFrame = target_nanoseconds_per_frame / (1024.0 * 1024 * 1024);
 
-        for (uint row = start_row;
-            row < start_row + 100;
-            ++row)
-        {
-            uint8_t *buffer_row = p.texture_buffer + (row * 4 * 960);
-            for (uint col = start_col;
-                col < start_col + 20;
-                ++col)
-            {
-                uint8_t *pixel = buffer_row + (col * 4);
-                *pixel = 255;
-            }
-        }
+        game_offscreen_buffer game_buffer = {};
+        game_buffer.Memory = p.texture_buffer;
+        game_buffer.Width = 960;
+        game_buffer.Height = 540;
+        game_buffer.Pitch = 960 * 4;
+        game_buffer.BytesPerPixel = 4;
 
-        start_row += 40;
-        start_row %= 400;
-        start_col += 3;
-        start_col %= 900;
+        GameUpdateAndRender(&t, &m, new_input, &game_buffer);
 
         draw(app);
 
