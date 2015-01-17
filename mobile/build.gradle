@@ -13,7 +13,7 @@ android {
 
         ndk {
             moduleName "NdkHandmadeModule"
-            ldLibs "android", "log"
+            ldLibs "android", "log", "EGL", "GLESv2"
         }
     }
     buildTypes {

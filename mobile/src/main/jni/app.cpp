@@ -2,11 +2,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <EGL/egl.h>
+#include <GLES2/gl2.h>
+
 #include <android/log.h>
 #include "android_native_app_glue.h"
 
 struct user_data {
     char app_name[64];
+    EGLDisplay display;
+    EGLSurface surface;
+    EGLContext context;
 };
 
 char *cmd_names[] = {
@@ -28,6 +34,51 @@ char *cmd_names[] = {
     "APP_CMD_DESTROY",
 };
 
+void init(android_app *app)
+{
+    user_data *p = (user_data *)app->userData;
+
+    p->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    eglInitialize(p->display, 0, 0);
+
+    int attrib_list[] = {
+        EGL_RED_SIZE, 8,
+        EGL_GREEN_SIZE, 8,
+        EGL_BLUE_SIZE, 8,
+        EGL_ALPHA_SIZE, 8,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+        EGL_NONE
+    };
+
+    EGLConfig config;
+    int num_config;
+    eglChooseConfig(p->display, attrib_list, &config, 1, &num_config);
+
+    int format;
+    eglGetConfigAttrib(p->display, config, EGL_NATIVE_VISUAL_ID, &format);
+
+    ANativeWindow_setBuffersGeometry(app->window, 0, 0, format);
+    p->surface = eglCreateWindowSurface(p->display, config, app->window, 0);
+
+    const int context_attribs[] = {
+        EGL_CONTEXT_CLIENT_VERSION, 2,
+        EGL_NONE
+    };
+    eglBindAPI(EGL_OPENGL_ES_API);
+    p->context = eglCreateContext(p->display, config, EGL_NO_CONTEXT, context_attribs);
+
+    eglMakeCurrent(p->display, p->surface, p->surface, p->context);
+}
+
+void term(android_app *app)
+{
+    user_data *p = (user_data *)app->userData;
+    eglMakeCurrent(p->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(p->display, p->context);
+    eglDestroySurface(p->display, p->surface);
+    eglTerminate(p->display);
+}
+
 void on_app_cmd(android_app *app, int32_t cmd) {
     user_data *p = (user_data *)app->userData;
     if (cmd < sizeof(cmd_names))
@@ -37,6 +88,14 @@ void on_app_cmd(android_app *app, int32_t cmd) {
     else
     {
         __android_log_print(ANDROID_LOG_INFO, p->app_name, "unknown cmd is %d", cmd);
+    }
+    if (cmd == APP_CMD_INIT_WINDOW)
+    {
+        init(app);
+    }
+    if (cmd == APP_CMD_TERM_WINDOW)
+    {
+        term(app);
     }
     if (cmd == APP_CMD_DESTROY)
     {
@@ -74,21 +133,11 @@ void draw(android_app *app)
     user_data *p = (user_data *)app->userData;
     static uint8_t grey_value = 0;
     grey_value += 13;
-    ANativeWindow_Buffer lWindowBuffer;
-    ANativeWindow* lWindow = app->window;
-    if (!app->window)
-    {
-        return;
-    }
-    ANativeWindow_setBuffersGeometry(lWindow, 0, 0, WINDOW_FORMAT_RGBA_8888);
 
-    if (ANativeWindow_lock(lWindow, &lWindowBuffer, NULL) < 0) {
-        return;
-    }
+    glClearColor(grey_value / 255.0, grey_value / 255.0, grey_value / 255.0, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT);
 
-    memset(lWindowBuffer.bits, grey_value, lWindowBuffer.stride*lWindowBuffer.height*sizeof(uint32_t));
-
-    ANativeWindow_unlockAndPost(lWindow);
+    eglSwapBuffers(p->display, p->surface);
 }
 
 void android_main(android_app *app) {
@@ -153,7 +202,7 @@ void android_main(android_app *app) {
         int64_t time_taken = ((end_time.tv_sec * 1000000000 + end_time.tv_nsec) -
             (start_time.tv_sec * 1000000000 + start_time.tv_nsec));
 
-        int64_t time_to_sleep = 50 * 1000000;
+        int64_t time_to_sleep = 33 * 1000000;
         if (time_taken <= time_to_sleep)
         {
             timespec sleep_time = {};
