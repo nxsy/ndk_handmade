@@ -47,6 +47,9 @@ struct user_data {
     char *one_past_binary_filename_slash;
 
     motion_state motion;
+
+    game_input *new_input;
+    game_input *old_input;
 };
 
 char *cmd_names[] = {
@@ -294,6 +297,58 @@ int32_t on_motion_event(android_app *app, AInputEvent *event)
     return 1;
 }
 
+internal void
+process_keyboard_message(game_button_state *new_state, bool32 is_down)
+{
+    if (new_state->EndedDown != is_down)
+    {
+        new_state->EndedDown = is_down;
+        ++new_state->HalfTransitionCount;
+    }
+}
+
+int32_t on_key_event(android_app *app, AInputEvent *event)
+{
+    user_data *p = (user_data *)app->userData;
+    game_controller_input *old_keyboard_controller = GetController(p->old_input, 0);
+    game_controller_input *new_keyboard_controller = GetController(p->new_input, 0);
+
+    uint action = AKeyEvent_getAction(event);
+    if (action == AKEY_EVENT_ACTION_MULTIPLE)
+    {
+        return 1;
+    }
+    bool32 is_down = action == AKEY_EVENT_ACTION_DOWN;
+
+    int keycode = AKeyEvent_getKeyCode(event);
+    int meta_state = AKeyEvent_getMetaState(event);
+    if (keycode == 4)
+    {
+        return 0;
+    }
+    else if ((keycode == 51) || (keycode == 19))
+    {
+        process_keyboard_message(&new_keyboard_controller->MoveUp, is_down);
+    }
+    else if ((keycode == 29) || (keycode == 21))
+    {
+        process_keyboard_message(&new_keyboard_controller->MoveLeft, is_down);
+    }
+    else if ((keycode == 47) || (keycode == 20))
+    {
+        process_keyboard_message(&new_keyboard_controller->MoveDown, is_down);
+    }
+    else if ((keycode == 32) || (keycode == 22))
+    {
+        process_keyboard_message(&new_keyboard_controller->MoveRight, is_down);
+    }
+    else
+    {
+        __android_log_print(ANDROID_LOG_INFO, p->app_name, "key event: down %d, keycode %d, meta_state %x", is_down, keycode, meta_state);
+    }
+    return 1;
+}
+
 int32_t on_input_event(android_app *app, AInputEvent *event) {
     user_data *p = (user_data *)app->userData;
     int event_type = AInputEvent_getType(event);
@@ -302,14 +357,11 @@ int32_t on_input_event(android_app *app, AInputEvent *event) {
     {
         case AINPUT_EVENT_TYPE_KEY:
         {
-            __android_log_print(ANDROID_LOG_INFO, p->app_name, "event_type was AINPUT_EVENT_TYPE_KEY");
-            break;
+            return on_key_event(app, event);
         }
         case AINPUT_EVENT_TYPE_MOTION:
         {
-            // __android_log_print(ANDROID_LOG_INFO, p->app_name, "event_type was AINPUT_EVENT_TYPE_MOTION");
             return on_motion_event(app, event);
-            break;
         }
         default:
         {
@@ -421,8 +473,8 @@ process_button(bool down, game_button_state *old_state, game_button_state *new_s
 internal void
 hh_process_events(android_app *app, game_input *new_input, game_input *old_input)
 {
-    game_controller_input *old_controller = GetController(old_input, 0);
-    game_controller_input *new_controller = GetController(new_input, 0);
+    game_controller_input *old_controller = GetController(old_input, 1);
+    game_controller_input *new_controller = GetController(new_input, 1);
 
     user_data *p = (user_data *)app->userData;
     pan_state *pan = &p->motion.pan;
@@ -465,8 +517,8 @@ void android_main(android_app *app) {
     thread_context t = {};
 
     game_input input[2] = {};
-    game_input *new_input = &input[0];
-    game_input *old_input = &input[1];
+    p.new_input = &input[0];
+    p.old_input = &input[1];
 
     int monitor_refresh_hz = 60;
     real32 game_update_hz = (monitor_refresh_hz / 2.0f); // Should almost always be an int...
@@ -475,6 +527,19 @@ void android_main(android_app *app) {
     while (++counter) {
         timespec start_time = {};
         clock_gettime(CLOCK_MONOTONIC_RAW, &start_time);
+
+        game_controller_input *old_keyboard_controller = GetController(p.old_input, 0);
+        game_controller_input *new_keyboard_controller = GetController(p.new_input, 0);
+        *new_keyboard_controller = {};
+        new_keyboard_controller->IsConnected = true;
+        for (
+                uint button_index = 0;
+                button_index < ArrayCount(new_keyboard_controller->Buttons);
+                ++button_index)
+        {
+            new_keyboard_controller->Buttons[button_index].EndedDown =
+                old_keyboard_controller->Buttons[button_index].EndedDown;
+        }
 
         int poll_result, events;
         android_poll_source *source;
@@ -513,9 +578,9 @@ void android_main(android_app *app) {
             }
         }
 
-        new_input->dtForFrame = target_nanoseconds_per_frame / (1024.0 * 1024 * 1024);
+        p.new_input->dtForFrame = target_nanoseconds_per_frame / (1024.0 * 1024 * 1024);
 
-        hh_process_events(app, new_input, old_input);
+        hh_process_events(app, p.new_input, p.old_input);
 
         game_offscreen_buffer game_buffer = {};
         game_buffer.Memory = p.texture_buffer;
@@ -524,7 +589,7 @@ void android_main(android_app *app) {
         game_buffer.Pitch = 960 * 4;
         game_buffer.BytesPerPixel = 4;
 
-        GameUpdateAndRender(&t, &m, new_input, &game_buffer);
+        GameUpdateAndRender(&t, &m, p.new_input, &game_buffer);
         draw(app);
 
         timespec end_time = {};
@@ -552,8 +617,8 @@ void android_main(android_app *app) {
             }
         }
 
-        game_input *temp_input = new_input;
-        new_input = old_input;
-        old_input = temp_input;
+        game_input *temp_input = p.new_input;
+        p.new_input = p.old_input;
+        p.old_input = temp_input;
     }
 }
