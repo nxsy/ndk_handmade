@@ -13,6 +13,17 @@
 
 #include "handmade.cpp"
 
+struct pan_state {
+    bool32 in_pan;
+    v2 start_pos;
+    v2 magnitude;
+    v2 stick;
+};
+
+struct motion_state {
+    pan_state pan;
+};
+
 struct user_data {
     char app_name[64];
     EGLDisplay display;
@@ -34,6 +45,8 @@ struct user_data {
 
     char binary_name[1024];
     char *one_past_binary_filename_slash;
+
+    motion_state motion;
 };
 
 char *cmd_names[] = {
@@ -211,6 +224,76 @@ void on_app_cmd(android_app *app, int32_t cmd) {
     }
 }
 
+int32_t on_motion_event(android_app *app, AInputEvent *event)
+{
+    /*
+    AMotionEvent_getAction();
+    AMotionEvent_getEventTime();
+    AMotionEvent_getPointerCount();
+    AMotionEvent_getPointerId();
+    AMotionEvent_getX();
+    AMotionEvent_getY();
+
+    AMOTION_EVENT_ACTION_DOWN
+    AMOTION_EVENT_ACTION_UP
+    AMOTION_EVENT_ACTION_MOVE
+    AMOTION_EVENT_ACTION_CANCEL
+    AMOTION_EVENT_ACTION_POINTER_DOWN
+    AMOTION_EVENT_ACTION_POINTER_UP
+    */
+    user_data *p = (user_data *)app->userData;
+    pan_state *pan = &p->motion.pan;
+
+    pan->stick = {};
+
+    uint action = AMotionEvent_getAction(event);
+    uint num_pointers = AMotionEvent_getPointerCount(event);
+    if (num_pointers != 2 || action == AMOTION_EVENT_ACTION_UP || action == AMOTION_EVENT_ACTION_CANCEL)
+    {
+        if (pan->in_pan)
+        {
+            __android_log_print(ANDROID_LOG_INFO, p->app_name, "ending pan");
+        }
+        pan->in_pan = 0;
+    }
+    else
+    {
+        uint pointer_id_0 = AMotionEvent_getPointerId(event, 0);
+        uint pointer_id_1 = AMotionEvent_getPointerId(event, 1);
+        v2 pointer_pos_0 = {AMotionEvent_getX(event, pointer_id_0), AMotionEvent_getY(event, pointer_id_0)};
+        v2 pointer_pos_1 = {AMotionEvent_getX(event, pointer_id_1), AMotionEvent_getY(event, pointer_id_1)};
+        v2 center_pos = (pointer_pos_0 + pointer_pos_1) * 0.5f;
+
+        if (!pan->in_pan)
+        {
+            __android_log_print(ANDROID_LOG_INFO, p->app_name, "starting pan");
+            __android_log_print(ANDROID_LOG_INFO, p->app_name, "pointer_pos_0: %0.2f, %0.2f", pointer_pos_0.X, pointer_pos_0.Y);
+            __android_log_print(ANDROID_LOG_INFO, p->app_name, "pointer_pos_1: %0.2f, %0.2f", pointer_pos_1.X, pointer_pos_1.Y);
+            __android_log_print(ANDROID_LOG_INFO, p->app_name, "center_pos: %0.2f, %0.2f", center_pos.X, center_pos.Y);
+            pan->in_pan = 1;
+            pan->start_pos = center_pos;
+        }
+
+        if (pan->in_pan)
+        {
+            v2 distance = center_pos - pan->start_pos;
+            if ((abs(distance.X) > 100) || (abs(distance.Y) > 100))
+            {
+                if (abs(distance.X) > 100)
+                {
+                    pan->stick.X = distance.X > 0 ? 1.0 : -1.0;
+                }
+                if (abs(distance.Y) > 100)
+                {
+                    pan->stick.Y = distance.Y < 0 ? 1.0 : -1.0;
+                }
+            }
+            __android_log_print(ANDROID_LOG_INFO, p->app_name, "pan->stick: %0.2f, %0.2f", pan->stick.X, pan->stick.Y);
+        }
+    }
+    return 1;
+}
+
 int32_t on_input_event(android_app *app, AInputEvent *event) {
     user_data *p = (user_data *)app->userData;
     int event_type = AInputEvent_getType(event);
@@ -224,7 +307,8 @@ int32_t on_input_event(android_app *app, AInputEvent *event) {
         }
         case AINPUT_EVENT_TYPE_MOTION:
         {
-            __android_log_print(ANDROID_LOG_INFO, p->app_name, "event_type was AINPUT_EVENT_TYPE_MOTION");
+            // __android_log_print(ANDROID_LOG_INFO, p->app_name, "event_type was AINPUT_EVENT_TYPE_MOTION");
+            return on_motion_event(app, event);
             break;
         }
         default:
@@ -327,6 +411,28 @@ DEBUG_PLATFORM_READ_ENTIRE_FILE(debug_read_entire_file)
     return(result);
 }
 
+internal void
+process_button(bool down, game_button_state *old_state, game_button_state *new_state)
+{
+    new_state->EndedDown = down;
+    new_state->HalfTransitionCount = (old_state->EndedDown != new_state->EndedDown) ? 1 : 0;
+}
+
+internal void
+hh_process_events(android_app *app, game_input *new_input, game_input *old_input)
+{
+    game_controller_input *old_controller = GetController(old_input, 0);
+    game_controller_input *new_controller = GetController(new_input, 0);
+
+    user_data *p = (user_data *)app->userData;
+    pan_state *pan = &p->motion.pan;
+
+    process_button((pan->stick.X > 0), &old_controller->MoveRight, &new_controller->MoveRight);
+    process_button((pan->stick.X < 0), &old_controller->MoveLeft, &new_controller->MoveLeft);
+    process_button((pan->stick.Y > 0), &old_controller->MoveUp, &new_controller->MoveUp);
+    process_button((pan->stick.Y < 0), &old_controller->MoveDown, &new_controller->MoveDown);
+}
+
 void android_main(android_app *app) {
     app_dummy();
 
@@ -409,6 +515,8 @@ void android_main(android_app *app) {
 
         new_input->dtForFrame = target_nanoseconds_per_frame / (1024.0 * 1024 * 1024);
 
+        hh_process_events(app, new_input, old_input);
+
         game_offscreen_buffer game_buffer = {};
         game_buffer.Memory = p.texture_buffer;
         game_buffer.Width = 960;
@@ -417,7 +525,6 @@ void android_main(android_app *app) {
         game_buffer.BytesPerPixel = 4;
 
         GameUpdateAndRender(&t, &m, new_input, &game_buffer);
-
         draw(app);
 
         timespec end_time = {};
@@ -445,5 +552,8 @@ void android_main(android_app *app) {
             }
         }
 
+        game_input *temp_input = new_input;
+        new_input = old_input;
+        old_input = temp_input;
     }
 }
